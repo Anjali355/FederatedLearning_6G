@@ -6,23 +6,23 @@ import flwr as fl
 from flwr.common import parameters_to_ndarrays
 from flwr.common import Context
 
-from model import MLP, set_model_params
+from model import MLP, set_model_params, get_model_params
 from client import ClientConfig, FlowerClient
 from utils import set_seed, minmax_scale, make_partitions
 from strategy import TrustFedAvg
 from plot_results import plot_training_curves, plot_model_eval
 from network_6g import Network6GSimulator, FederatedLearning6G, NetworkSlice, DeviceStatus
+from live_dashboard import FederatedLearningDashboard, create_network_status_for_dashboard
 
 
 class Integrated6GTrustFedAvg(TrustFedAvg):
     """Enhanced TrustFedAvg that updates 6G network with trust scores"""
     
-    def __init__(self, network_6g=None, fl_6g=None, **kwargs):
+    def __init__(self, network_6g=None, fl_6g=None, dashboard=None, **kwargs):
         super().__init__(**kwargs)
         self.network_6g = network_6g
         self.fl_6g = fl_6g
-        
-        
+        self.dashboard = dashboard
         
         # Reset tracking variables
         # self.client_stats = {}
@@ -70,6 +70,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--outdir", type=str, default="artifacts_flower")
+    parser.add_argument("--dashboard", action="store_true", help="Enable live visualization dashboard")
     args = parser.parse_args()
 
     # ------------------------------
@@ -158,15 +159,29 @@ def main():
             lr=args.lr,
             malicious=(k in malicious_ids),
         )
-        return FlowerClient(cfg, d_in=X.shape[1]).to_client()
+        # Return NumPyClient directly (don't wrap with to_client for custom simulation)
+        return FlowerClient(cfg, d_in=X.shape[1])
 
     # ------------------------------
-    # Strategy with 6G Integration
+    # Strategy with 6G Integration + Dashboard
     # ------------------------------
+    dashboard = None
+    if args.dashboard:
+        print("[INFO] Initializing live dashboard...")
+        dashboard = FederatedLearningDashboard(
+            num_clients=K,
+            num_rounds=args.rounds,
+            outdir=args.outdir
+        )
+        dashboard.set_malicious_clients(malicious_ids)
+    else:
+        print("[INFO] Dashboard disabled (use --dashboard to enable)")
+    
     testset = (X_test, y_test)
     strategy = Integrated6GTrustFedAvg(
         network_6g=network_6g,
         fl_6g=fl_6g,
+        dashboard=dashboard,
         testset=testset,
         device= torch_device,
         outdir=args.outdir,
@@ -177,15 +192,91 @@ def main():
     print(f"[DEBUG] Using integrated strategy: {type(strategy).__name__}")
 
     # ------------------------------
-    # Run simulation with 6G integration
+    # Run simulation with 6G integration (Python 3.14 Compatible)
     # ------------------------------
     print("\n[INFO] Starting integrated 6G + Federated Learning simulation...")
-    hist = fl.simulation.start_simulation(
-        client_fn=client_fn,
-        num_clients=K,
-        config=fl.server.ServerConfig(num_rounds=args.rounds),
-        strategy=strategy,
-        client_resources={"num_cpus": 1, "num_gpus": 0.0},
+    print("[INFO] Using sequential simulation mode (Python 3.14 compatible - Ray not available)")
+    
+    # Custom simulation loop for Python 3.14 compatibility (Ray not supported yet)
+    from collections import defaultdict
+    hist_dict = defaultdict(list)
+    
+    # Initialize global model
+    global_model = MLP(d_in=X.shape[1]).to(torch_device)
+    global_params = get_model_params(global_model)
+    
+    for round_num in range(1, args.rounds + 1):
+        print(f"\n{'='*60}")
+        print(f"Round {round_num}/{args.rounds}")
+        print(f"{'='*60}")
+        
+        # Sample clients for this round
+        num_clients_this_round = max(1, int(args.client_frac * K))
+        sampled_client_ids = np.random.choice(K, size=num_clients_this_round, replace=False)
+        
+        # Collect client updates and metrics for dashboard
+        results = []
+        failures = []
+        client_metrics_for_dashboard = {}
+        
+        for cid in sampled_client_ids:
+            try:
+                client = client_fn(str(cid))
+                params, num_examples, metrics = client.fit(global_params, {})
+                results.append((str(cid), fl.common.FitRes(
+                    status=fl.common.Status(code=fl.common.Code.OK, message="Success"),
+                    parameters=fl.common.ndarrays_to_parameters(params),
+                    num_examples=num_examples,
+                    metrics=metrics
+                )))
+                # Store client metrics for dashboard
+                client_metrics_for_dashboard[int(cid)] = metrics
+            except Exception as e:
+                print(f"[ERROR] Client {cid} failed: {e}")
+                failures.append((str(cid), str(e)))
+        
+        # Aggregate updates
+        aggregated_params, aggregated_metrics = strategy.aggregate_fit(round_num, results, failures)
+        
+        if aggregated_params is not None:
+            global_params = fl.common.parameters_to_ndarrays(aggregated_params)
+        
+        # Update dashboard with round metrics
+        test_acc = aggregated_metrics.get('test_acc', 0) if aggregated_metrics else 0
+        test_loss = aggregated_metrics.get('test_loss', 0) if aggregated_metrics else 0
+        
+        # Enrich client metrics with trust and detection scores
+        for cid in client_metrics_for_dashboard:
+            cid_str = str(cid)
+            if cid_str in strategy.client_stats:
+                client_metrics_for_dashboard[cid]['trust_score'] = strategy.trust_scores.get(cid_str, 1.0)
+                client_metrics_for_dashboard[cid]['detection_score'] = sum(strategy.client_stats[cid_str].get('detection_scores', {}).values())
+                client_metrics_for_dashboard[cid]['weight'] = strategy.client_stats[cid_str].get('final_weight', 0)
+        
+        dashboard_metrics = {
+            'test_acc': test_acc,
+            'test_loss': test_loss,
+            'client_metrics': client_metrics_for_dashboard
+        }
+        
+        network_status = create_network_status_for_dashboard(network_6g)
+        if dashboard:
+            dashboard.update_round(round_num, dashboard_metrics, network_status)
+        
+        # Record metrics
+        if aggregated_metrics:
+            for key, value in aggregated_metrics.items():
+                hist_dict[key].append(value)
+    
+    # Convert to history object format
+    class SimulationHistory:
+        def __init__(self, metrics_distributed, losses_distributed):
+            self.metrics_distributed = metrics_distributed
+            self.losses_distributed = losses_distributed
+    
+    hist = SimulationHistory(
+        metrics_distributed={"test_acc": [(r, hist_dict.get("test_acc", [0]*args.rounds)[r-1]) for r in range(1, args.rounds+1)]},
+        losses_distributed=[(r, hist_dict.get("test_loss", [0]*args.rounds)[r-1]) for r in range(1, args.rounds+1)]
     )
 
     # ------------------------------
@@ -247,10 +338,17 @@ def main():
     # Generate plots
     # ------------------------------
     print("[INFO] Generating training plots...")
-    plot_training_curves(
-        log_csv=os.path.join(args.outdir, "training_log.csv"),
-        outdir=args.outdir,
-    )
+    training_log_path = os.path.join(args.outdir, "enhanced_trust_log.csv")
+    if os.path.exists(training_log_path):
+        try:
+            plot_training_curves(
+                log_csv=training_log_path,
+                outdir=args.outdir,
+            )
+        except Exception as e:
+            print(f"[WARNING] Could not generate training curves: {e}")
+    else:
+        print(f"[WARNING] Training log not found at {training_log_path}, skipping training curves")
 
     print("[INFO] Generating evaluation plots (ROC, Confusion Matrix)...")
     plot_model_eval(
@@ -259,6 +357,15 @@ def main():
         y_test=y_test,
         outdir=args.outdir,
     )
+    
+    # ------------------------------
+    # Save and close dashboard
+    # ------------------------------
+    if dashboard:
+        print("[INFO] Saving final dashboard...")
+        dashboard.close()
+        print(f"[DASHBOARD] Live dashboard saved to {args.outdir}/final_dashboard.png")
+        print("[INFO] Dashboard window will remain open - close it manually when done viewing")
 
     print(f"[DONE] Results stored in {args.outdir}")
 

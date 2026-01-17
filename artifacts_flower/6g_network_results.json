@@ -1,0 +1,88 @@
+{
+  "final_status": {
+    "total_devices": 12,
+    "active_devices": 11,
+    "suspicious_devices": 1,
+    "blocked_devices": 0,
+    "base_stations": [
+      {
+        "bs_id": "BS_0",
+        "connected_count": 1,
+        "utilization": 0.02
+      },
+      {
+        "bs_id": "BS_1",
+        "connected_count": 1,
+        "utilization": 0.02
+      },
+      {
+        "bs_id": "BS_2",
+        "connected_count": 3,
+        "utilization": 0.06
+      },
+      {
+        "bs_id": "BS_3",
+        "connected_count": 0,
+        "utilization": 0.0
+      },
+      {
+        "bs_id": "BS_4",
+        "connected_count": 0,
+        "utilization": 0.0
+      },
+      {
+        "bs_id": "BS_5",
+        "connected_count": 3,
+        "utilization": 0.06
+      },
+      {
+        "bs_id": "BS_6",
+        "connected_count": 1,
+        "utilization": 0.02
+      },
+      {
+        "bs_id": "BS_7",
+        "connected_count": 1,
+        "utilization": 0.02
+      },
+      {
+        "bs_id": "BS_8",
+        "connected_count": 1,
+        "utilization": 0.02
+      },
+      {
+        "bs_id": "BS_9",
+        "connected_count": 0,
+        "utilization": 0.0
+      },
+      {
+        "bs_id": "BS_10",
+        "connected_count": 1,
+        "utilization": 0.02
+      },
+      {
+        "bs_id": "BS_11",
+        "connected_count": 0,
+        "utilization": 0.0
+      }
+    ]
+  },
+  "security_events": [],
+  "device_trust_scores": {
+    "0": 0.9999885951713028,
+    "1": 0.9999999943001698,
+    "2": 0.9735212295048015,
+    "3": 0.8690717986233529,
+    "4": 0.9999999912066737,
+    "5": 0.9999999985393027,
+    "6": 0.9999999855553405,
+    "7": 0.999971758958015,
+    "8": 0.9999344043300147,
+    "9": 0.9999999985774894,
+    "10": 0.9999999989042517,
+    "11": 0.9999999332733772
+  },
+  "malicious_detected": [
+    "3"
+  ]
+}
