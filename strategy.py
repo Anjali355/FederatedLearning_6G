@@ -9,9 +9,18 @@ import flwr as fl
 from sklearn.metrics import accuracy_score, log_loss
 
 from model import MLP, set_model_params
+from byzantine_defense import ByzantineDefense, detect_byzantine_clients
+from differential_privacy import DifferentialPrivacy, AdaptivePrivacy
+from trust_prediction import TrustPredictor, EarlyWarningSystem
 
 class TrustFedAvg(fl.server.strategy.FedAvg):
-    def __init__(self, testset, device, outdir, **kwargs):
+    def __init__(self, testset, device, outdir, 
+                 aggregation_method='fedavg',
+                 use_differential_privacy=False,
+                 dp_epsilon=1.0,
+                 dp_delta=1e-5,
+                 use_trust_prediction=False,
+                 **kwargs):
         super().__init__(**kwargs)
         self.X_test, self.y_test = testset
         self.device = device
@@ -22,7 +31,25 @@ class TrustFedAvg(fl.server.strategy.FedAvg):
         self.global_model_history = []
         self.round_metrics = defaultdict(list)  # Track metrics over time
         self.detection_history = defaultdict(list)  # Track detection results
-        self.blocked_clients = set()  # Track permanently blocked clien #2
+        self.blocked_clients = set()  # Track permanently blocked clients
+        
+        # Priority 1: Byzantine Defense
+        self.aggregation_method = aggregation_method
+        self.byzantine_defense = ByzantineDefense(num_byzantine=2)  # Assumes ~10-15% malicious
+        
+        # Priority 1: Differential Privacy
+        self.use_differential_privacy = use_differential_privacy
+        self.adaptive_privacy = AdaptivePrivacy(base_epsilon=dp_epsilon)
+        self.dp_mechanisms = {}  # Per-client DP mechanisms
+        
+        # Priority 1: Trust Prediction
+        self.use_trust_prediction = use_trust_prediction
+        if use_trust_prediction:
+            self.trust_predictor = TrustPredictor(lookback_window=5)
+            self.early_warning = EarlyWarningSystem()
+        else:
+            self.trust_predictor = None
+            self.early_warning = None
         
         os.makedirs(outdir, exist_ok=True)
         self.logfile = os.path.join(outdir, "enhanced_trust_log.csv")
@@ -31,7 +58,8 @@ class TrustFedAvg(fl.server.strategy.FedAvg):
             writer.writerow([
                 "round", "client_id", "test_acc", "test_loss", "trust_score", 
                 "is_malicious_detected", "grad_norm", "param_divergence", 
-                "cosine_similarity", "performance_variance", "label_flip_score"
+                "cosine_similarity", "performance_variance", "label_flip_score",
+                "predicted_trust", "dp_epsilon", "aggregation_method"
             ])
 
     def aggregate_fit(self, rnd, results, failures):
@@ -125,7 +153,7 @@ class TrustFedAvg(fl.server.strategy.FedAvg):
             print(f"[WEIGHTS] Client {client_id}: {base_weight:.4f} -> {adjusted_weight:.4f} "
                   f"(reduction: {(1-adjusted_weight/base_weight)*100:.1f}%)")
         
-        # Aggregation
+        # Aggregation with Byzantine Defense
         param_arrays = [fl.common.parameters_to_ndarrays(params) for params, _ in weights_results]
         weights = [weight for _, weight in weights_results]
         
@@ -136,14 +164,62 @@ class TrustFedAvg(fl.server.strategy.FedAvg):
             print("[ERROR] All clients excluded due to low trust")
             return None, {}
         
-        # Weighted average
-        aggregated_arrays = []
-        for layer_idx in range(len(param_arrays[0])):
-            layer_arrays = [client_params[layer_idx] for client_params in param_arrays]
-            weighted_sum = np.zeros_like(layer_arrays[0])
-            for arr, weight in zip(layer_arrays, weights):
-                weighted_sum += arr * weight
-            aggregated_arrays.append(weighted_sum)
+        # Apply Byzantine-robust aggregation
+        print(f"\n[AGGREGATION] Using method: {self.aggregation_method}")
+        
+        # Flatten each client's parameters for Byzantine detection
+        shapes = [arr.shape for arr in param_arrays[0]]
+        flattened_params = []
+        for client_params in param_arrays:
+            flat = np.concatenate([arr.flatten() for arr in client_params])
+            flattened_params.append(flat)
+        
+        if self.aggregation_method in ['krum', 'multi-krum', 'trimmed-mean', 'median']:
+            # Apply Byzantine-robust method
+            if self.aggregation_method == 'krum':
+                flat_aggregated = self.byzantine_defense.krum(flattened_params)
+                print("[AGGREGATION] Applied Krum - selected most representative update")
+            elif self.aggregation_method == 'multi-krum':
+                flat_aggregated = self.byzantine_defense.multi_krum(flattened_params, m=5)
+                print("[AGGREGATION] Applied Multi-Krum - averaged top 5 updates")
+            elif self.aggregation_method == 'trimmed-mean':
+                flat_aggregated = self.byzantine_defense.trimmed_mean(flattened_params, beta=2)
+                print("[AGGREGATION] Applied Trimmed Mean - removed extremes")
+            elif self.aggregation_method == 'median':
+                flat_aggregated = self.byzantine_defense.coordinate_wise_median(flattened_params)
+                print("[AGGREGATION] Applied Coordinate-wise Median")
+            
+            # Reconstruct layer structure
+            aggregated_arrays = []
+            start_idx = 0
+            for shape in shapes:
+                size = np.prod(shape)
+                layer_flat = flat_aggregated[start_idx:start_idx + size]
+                aggregated_arrays.append(layer_flat.reshape(shape))
+                start_idx += size
+        else:  # 'fedavg' or default
+            # Traditional weighted average
+            aggregated_arrays = []
+            for layer_idx in range(len(param_arrays[0])):
+                layer_arrays = [client_params[layer_idx] for client_params in param_arrays]
+                weighted_sum = np.zeros_like(layer_arrays[0])
+                for arr, weight in zip(layer_arrays, weights):
+                    weighted_sum += arr * weight
+                aggregated_arrays.append(weighted_sum)
+            print("[AGGREGATION] Applied standard FedAvg")
+        
+        # Detect Byzantine clients
+        byzantine_detected = detect_byzantine_clients(flattened_params)
+        if len(byzantine_detected) > 0:
+            print(f"[BYZANTINE DETECTION] Potential Byzantine clients: {byzantine_detected}")
+            for idx in byzantine_detected:
+                cid = list(client_data)[idx][0]
+                if cid in self.trust_scores:
+                    self.trust_scores[cid] *= 0.5  # Penalize
+        
+        # Calculate robustness score
+        robustness = self.byzantine_defense.get_robustness_score(flattened_params)
+        print(f"[ROBUSTNESS] Update dispersion score: {robustness:.4f}")
         
         aggregated_parameters = fl.common.ndarrays_to_parameters(aggregated_arrays)
         
@@ -155,19 +231,71 @@ class TrustFedAvg(fl.server.strategy.FedAvg):
         print(f"[ROUND {rnd}] Test Acc: {test_acc:.4f}, Test Loss: {test_loss:.4f}")
         print(f"[DETECTION] Malicious: {malicious_detected}, Suspicious: {suspicious_detected}")
         
-        # Enhanced logging
+        # Trust Prediction (Priority 1)
+        trust_predictions = {}
+        if self.use_trust_prediction and rnd >= 5:
+            # Train predictor on historical data
+            try:
+                trust_history_matrix = self._build_trust_history_matrix()
+                if trust_history_matrix.shape[1] >= 5:
+                    self.trust_predictor.train(trust_history_matrix)
+                    
+                    # Predict future trust for each client
+                    for client_id in self.trust_scores:
+                        recent_scores = [m['detection_score'] for m in self.round_metrics[client_id][-5:]]
+                        if len(recent_scores) >= 5:
+                            recent_array = np.array(recent_scores)
+                            predicted_trust = self.trust_predictor.predict(recent_array)
+                            trust_predictions[client_id] = predicted_trust
+                    
+                    # Early warning system
+                    warnings = self.early_warning.prioritize_clients(
+                        {cid: np.array([1.0 - m['detection_score'] for m in self.round_metrics[cid]]) 
+                         for cid in self.trust_scores}
+                    )
+                    if warnings:
+                        print(f"\n[EARLY WARNING] {len(warnings)} clients with degrading trust:")
+                        for cid, warning_info in warnings[:3]:  # Show top 3
+                            print(f"  Client {cid}: {warning_info['reason']} "
+                                  f"(severity: {warning_info['severity']})")
+            except Exception as e:
+                print(f"[WARNING] Trust prediction failed: {e}")
+        
+        # Enhanced logging with Priority 1 features
         for client_id in detection_results:
             with open(self.logfile, "a", newline="") as f:
                 writer = csv.writer(f)
                 stats = self.client_stats[client_id]
+                
+                # Get DP epsilon if used
+                dp_eps = 0.0
+                if self.use_differential_privacy and client_id in self.dp_mechanisms:
+                    dp_eps = self.dp_mechanisms[client_id].epsilon
+                
+                # Get predicted trust
+                pred_trust = trust_predictions.get(client_id, -1.0)
+                
                 writer.writerow([
                     rnd, client_id, test_acc, test_loss, stats["trust_score"],
                     stats["is_malicious"], stats.get("grad_norm", 0),
-                    detection_results[client_id], "computed", "computed", "computed"
+                    detection_results[client_id], "computed", "computed", "computed",
+                    pred_trust, dp_eps, self.aggregation_method
                 ])
         
         self.trust_weights = self.trust_scores.copy()
         return aggregated_parameters, {}
+    
+    def _build_trust_history_matrix(self):
+        """Build matrix of trust scores over time for prediction"""
+        client_ids = sorted(self.trust_scores.keys())
+        max_rounds = max(len(self.round_metrics[cid]) for cid in client_ids)
+        
+        matrix = np.zeros((len(client_ids), max_rounds))
+        for i, cid in enumerate(client_ids):
+            for j, metrics in enumerate(self.round_metrics[cid]):
+                matrix[i, j] = 1.0 - metrics['detection_score']  # Convert to trust
+        
+        return matrix
 
     def _comprehensive_malicious_detection(self, client_id, metrics, params, round_num):
         """Multi-factor malicious client detection"""

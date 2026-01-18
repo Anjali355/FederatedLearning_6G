@@ -16,6 +16,60 @@ import numpy as np
 from pathlib import Path
 import time
 
+
+def create_network_status_for_dashboard(network_6g):
+    """
+    Helper function to extract network status for dashboard visualization
+    
+    Args:
+        network_6g: Network6GSimulator instance
+        
+    Returns:
+        dict with network status information
+    """
+    if network_6g is None:
+        return {
+            'base_stations': [],
+            'devices': {},
+            'network_slices': {}
+        }
+    
+    # Extract base station info
+    base_stations = []
+    for bs in network_6g.base_stations:
+        base_stations.append({
+            'id': bs.bs_id,
+            'location': bs.location,
+            'connected_devices': len(bs.connected_devices),
+            'capacity': bs.capacity
+        })
+    
+    # Extract device info
+    devices = {}
+    for device_id, device in network_6g.devices.items():
+        devices[device_id] = {
+            'status': device.status.value if hasattr(device.status, 'value') else str(device.status),
+            'location': device.location,
+            'trust_score': getattr(device, 'trust_score', 0.5),
+            'base_station': device.base_station.bs_id if device.base_station else None
+        }
+    
+    # Extract network slice info
+    network_slices = {}
+    if hasattr(network_6g, 'network_slices'):
+        for slice_type, slice_obj in network_6g.network_slices.items():
+            network_slices[slice_type] = {
+                'allocated_devices': len(getattr(slice_obj, 'allocated_devices', [])),
+                'requirements': getattr(slice_obj, 'requirements', {})
+            }
+    
+    return {
+        'base_stations': base_stations,
+        'devices': devices,
+        'network_slices': network_slices
+    }
+
+
 class InteractiveDashboard:
     def __init__(self, outdir="artifacts_flower", port=8050):
         self.outdir = outdir
@@ -351,7 +405,7 @@ class InteractiveDashboard:
             ))
         
         fig.update_layout(
-            title="📡 6G Network Topology (Interactive - Click & Drag to Pan, Scroll to Zoom)",
+            title="📡 6G Network Topology",
             xaxis=dict(title="X Position (m)", range=[0, 5000]),
             yaxis=dict(title="Y Position (m)", range=[0, 5000], scaleanchor="x"),
             template='plotly_white',

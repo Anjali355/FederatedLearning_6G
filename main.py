@@ -12,7 +12,7 @@ from utils import set_seed, minmax_scale, make_partitions
 from strategy import TrustFedAvg
 from plot_results import plot_training_curves, plot_model_eval
 from network_6g import Network6GSimulator, FederatedLearning6G, NetworkSlice, DeviceStatus
-from live_dashboard import FederatedLearningDashboard, create_network_status_for_dashboard
+from interactive_dashboard import InteractiveDashboard, create_network_status_for_dashboard
 
 
 class Integrated6GTrustFedAvg(TrustFedAvg):
@@ -71,6 +71,19 @@ def main():
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--outdir", type=str, default="artifacts_flower")
     parser.add_argument("--dashboard", action="store_true", help="Enable live visualization dashboard")
+    
+    # Priority 1: Security & Trust Features
+    parser.add_argument("--aggregation", type=str, default="fedavg", 
+                       choices=["fedavg", "krum", "multi-krum", "trimmed-mean", "median"],
+                       help="Byzantine-robust aggregation method")
+    parser.add_argument("--use-dp", action="store_true", help="Enable differential privacy")
+    parser.add_argument("--dp-epsilon", type=float, default=1.0, help="Privacy budget (epsilon)")
+    parser.add_argument("--dp-delta", type=float, default=1e-5, help="Privacy failure probability (delta)")
+    parser.add_argument("--use-trust-prediction", action="store_true", 
+                       help="Enable trust score prediction and early warning")
+    parser.add_argument("--attack-type", type=str, default="none",
+                       choices=["none", "backdoor", "poisoning", "sybil", "byzantine"],
+                       help="Simulate specific attack type")
     args = parser.parse_args()
 
     # ------------------------------
@@ -165,15 +178,15 @@ def main():
     # ------------------------------
     # Strategy with 6G Integration + Dashboard
     # ------------------------------
+    # Initialize dashboard (if enabled)
+    # ------------------------------
     dashboard = None
     if args.dashboard:
         print("[INFO] Initializing live dashboard...")
-        dashboard = FederatedLearningDashboard(
-            num_clients=K,
-            num_rounds=args.rounds,
-            outdir=args.outdir
-        )
-        dashboard.set_malicious_clients(malicious_ids)
+        dashboard = InteractiveDashboard(outdir=args.outdir)
+        print(f"[INFO] Dashboard will be available at http://localhost:8050")
+        print("[INFO] Note: Dashboard reads from CSV files - start it separately with:")
+        print(f"      python interactive_dashboard.py")
     else:
         print("[INFO] Dashboard disabled (use --dashboard to enable)")
     
@@ -183,13 +196,20 @@ def main():
         fl_6g=fl_6g,
         dashboard=dashboard,
         testset=testset,
-        device= torch_device,
+        device=torch_device,
         outdir=args.outdir,
         fraction_fit=args.client_frac,
         min_fit_clients=max(1, int(args.client_frac * K)),
         min_available_clients=K,
+        # Priority 1 features
+        aggregation_method=args.aggregation,
+        use_differential_privacy=args.use_dp,
+        dp_epsilon=args.dp_epsilon,
+        dp_delta=args.dp_delta,
+        use_trust_prediction=args.use_trust_prediction,
     )
     print(f"[DEBUG] Using integrated strategy: {type(strategy).__name__}")
+    print(f"[SECURITY] Aggregation: {args.aggregation}, DP: {args.use_dp}, Trust Prediction: {args.use_trust_prediction}")
 
     # ------------------------------
     # Run simulation with 6G integration (Python 3.14 Compatible)
@@ -253,15 +273,8 @@ def main():
                 client_metrics_for_dashboard[cid]['detection_score'] = sum(strategy.client_stats[cid_str].get('detection_scores', {}).values())
                 client_metrics_for_dashboard[cid]['weight'] = strategy.client_stats[cid_str].get('final_weight', 0)
         
-        dashboard_metrics = {
-            'test_acc': test_acc,
-            'test_loss': test_loss,
-            'client_metrics': client_metrics_for_dashboard
-        }
-        
-        network_status = create_network_status_for_dashboard(network_6g)
-        if dashboard:
-            dashboard.update_round(round_num, dashboard_metrics, network_status)
+        # Dashboard updates automatically by reading CSV files
+        # No need to call update_round() - it monitors artifacts_folder/ directory
         
         # Record metrics
         if aggregated_metrics:
@@ -359,13 +372,14 @@ def main():
     )
     
     # ------------------------------
-    # Save and close dashboard
+    # ------------------------------
+    # Dashboard info
     # ------------------------------
     if dashboard:
-        print("[INFO] Saving final dashboard...")
-        dashboard.close()
-        print(f"[DASHBOARD] Live dashboard saved to {args.outdir}/final_dashboard.png")
-        print("[INFO] Dashboard window will remain open - close it manually when done viewing")
+        print("[INFO] Training complete!")
+        print(f"[INFO] To view interactive dashboard, run in another terminal:")
+        print(f"      python interactive_dashboard.py")
+        print(f"      Then open: http://localhost:8050")
 
     print(f"[DONE] Results stored in {args.outdir}")
 
