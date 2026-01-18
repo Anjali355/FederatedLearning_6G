@@ -248,6 +248,11 @@ Open browser: `http://localhost:8050` (or respective port)
 | Trust prediction not showing | Need 5+ rounds minimum |
 | Dashboard empty | Check CSV files in artifacts directory |
 
+---
+
+## System Architecture
+
+```
 ┌─────────────────────────────────────────────────────┐
 │                  CLIENT SIDE                        │
 │  (Runs on each device - client.py)                  │
@@ -303,3 +308,4 @@ Open browser: `http://localhost:8050` (or respective port)
 │  └───────────────────────────────────────────┘     │
 │                                                    │
 └────────────────────────────────────────────────────┘
+```
