@@ -16,6 +16,13 @@ class NetworkSlice(Enum):
     URLLC = "ultra_reliable_low_latency"  # Critical apps
     MMTC = "massive_machine_type"  # IoT devices
 
+class MovementPattern(Enum):
+    STATIC = "static"  # Stationary device
+    RANDOM_WALK = "random_walk"  # Random direction changes
+    DIRECTIONAL = "directional"  # Moving in one direction
+    CIRCULAR = "circular"  # Circular movement pattern
+    WAYPOINT = "waypoint"  # Moving between waypoints
+
 @dataclass
 class Device6G:
     device_id: str
@@ -28,14 +35,29 @@ class Device6G:
     status: DeviceStatus = DeviceStatus.ACTIVE
     trust_score: float = 1.0
     connection_quality: float = 1.0
+    # Mobility parameters
+    velocity: tuple = (0.0, 0.0)  # (vx, vy) in m/s
+    movement_pattern: MovementPattern = MovementPattern.RANDOM_WALK
+    max_speed: float = 30.0  # m/s (pedestrian/vehicle speed)
+    trajectory_history: list = None  # Track movement history
+    
+    def __post_init__(self):
+        if self.trajectory_history is None:
+            self.trajectory_history = [self.location]
 
 class BaseStation6G:
-    def __init__(self, bs_id: str, location: tuple, coverage_radius: float = 1000):
+    def __init__(self, bs_id: str, location: tuple, coverage_radius: float = 1000, is_mobile: bool = False):
         self.bs_id = bs_id
         self.location = location
         self.coverage_radius = coverage_radius
         self.connected_devices: Dict[str, Device6G] = {}
         self.max_devices = 50   # 6G massive connectivity
+        # Mobility parameters for aerial/mobile base stations
+        self.is_mobile = is_mobile
+        self.velocity = (0.0, 0.0)  # (vx, vy) in m/s
+        self.max_speed = 50.0  # m/s for aerial BS
+        self.trajectory_history = [location]
+        self.patrol_waypoints = []  # For aerial BS patrol routes
         
     def can_connect(self, device: Device6G) -> bool:
         # Check distance
@@ -50,21 +72,45 @@ class BaseStation6G:
         return False
 
 class Network6GSimulator:
-    def __init__(self, num_base_stations: int = 4, area_size: tuple = (5000, 5000)):
+    def __init__(self, num_base_stations: int = 4, area_size: tuple = (5000, 5000), mobile_bs_count: int = 1):
         self.area_size = area_size
-        self.base_stations = self._create_base_stations(num_base_stations)
+        self.base_stations = self._create_base_stations(num_base_stations, mobile_bs_count)
         self.devices: Dict[str, Device6G] = {}
         self.network_logs = []
         self.security_events = []
-        self.blocked_devices = set() #2
+        self.blocked_devices = set()
+        # Mobility simulation parameters
+        self.simulation_time = 0.0  # Current simulation time
+        self.time_step = 1.0  # Time step in seconds
+        self.mobility_enabled = True
         
-    def _create_base_stations(self, num_bs: int) -> List[BaseStation6G]:
+    def _create_base_stations(self, num_bs: int, mobile_count: int = 1) -> List[BaseStation6G]:
         stations = []
-        for i in range(num_bs):
+        # Create fixed base stations
+        for i in range(num_bs - mobile_count):
             x = random.uniform(0, self.area_size[0])
             y = random.uniform(0, self.area_size[1])
-            stations.append(BaseStation6G(f"BS_{i}", (x, y)))
+            stations.append(BaseStation6G(f"BS_{i}", (x, y), is_mobile=False))
+        
+        # Create mobile/aerial base stations
+        for i in range(mobile_count):
+            x = random.uniform(0, self.area_size[0])
+            y = random.uniform(0, self.area_size[1])
+            bs = BaseStation6G(f"BS_Mobile_{i}", (x, y), coverage_radius=1500, is_mobile=True)
+            # Set patrol waypoints for mobile BS
+            bs.patrol_waypoints = self._generate_patrol_route(5)
+            stations.append(bs)
+        
         return stations
+    
+    def _generate_patrol_route(self, num_waypoints: int) -> List[tuple]:
+        """Generate patrol waypoints for mobile base station"""
+        waypoints = []
+        for _ in range(num_waypoints):
+            x = random.uniform(self.area_size[0] * 0.2, self.area_size[0] * 0.8)
+            y = random.uniform(self.area_size[1] * 0.2, self.area_size[1] * 0.8)
+            waypoints.append((x, y))
+        return waypoints
     
     def add_device(self, device: Device6G) -> bool:
         """Add device to network and connect to nearest base station"""
@@ -172,25 +218,74 @@ class Network6GSimulator:
         }
         return slice_bandwidths.get(slice_type, 100.0)
     
-    def simulate_mobility(self, device_id: str):
-        """Simulate device movement and handoffs"""
-        if device_id not in self.devices:
-            return
-            
-        device = self.devices[device_id]
-        if device.status == DeviceStatus.BLOCKED:
-            return
-            
-        # Random movement
-        dx = random.uniform(-100, 100)
-        dy = random.uniform(-100, 100)
-        device.location = (
-            max(0, min(self.area_size[0], device.location[0] + dx)),
-            max(0, min(self.area_size[1], device.location[1] + dy))
-        )
+    def simulate_mobility(self, device_id: str = None, time_delta: float = None):
+        """Simulate device movement and handoffs with realistic mobility models"""
+        if time_delta is None:
+            time_delta = self.time_step
         
-        # Check if handoff needed
-        self._check_handoff(device)
+        # Move specific device or all devices
+        devices_to_move = [self.devices[device_id]] if device_id else list(self.devices.values())
+        
+        for device in devices_to_move:
+            if device.status == DeviceStatus.BLOCKED:
+                continue
+            
+            # Update device position based on movement pattern
+            self._update_device_position(device, time_delta)
+            
+            # Drain battery based on movement
+            battery_drain = 0.001 * device.max_speed / 30.0  # More drain for faster movement
+            device.battery_level = max(0, device.battery_level - battery_drain)
+            
+            # Check if handoff needed
+            self._check_handoff(device)
+    
+    def _update_device_position(self, device: Device6G, time_delta: float):
+        """Update device position based on its movement pattern"""
+        if device.movement_pattern == MovementPattern.STATIC:
+            return
+        
+        elif device.movement_pattern == MovementPattern.RANDOM_WALK:
+            # Change direction randomly
+            if random.random() < 0.3:  # 30% chance to change direction
+                angle = random.uniform(0, 2 * np.pi)
+                speed = random.uniform(0, device.max_speed)
+                device.velocity = (speed * np.cos(angle), speed * np.sin(angle))
+        
+        elif device.movement_pattern == MovementPattern.DIRECTIONAL:
+            # Maintain direction, occasional turns
+            if random.random() < 0.1:  # 10% chance to change direction
+                angle = random.uniform(0, 2 * np.pi)
+                speed = random.uniform(device.max_speed * 0.5, device.max_speed)
+                device.velocity = (speed * np.cos(angle), speed * np.sin(angle))
+        
+        elif device.movement_pattern == MovementPattern.CIRCULAR:
+            # Circular movement around a center point
+            center_x, center_y = self.area_size[0] / 2, self.area_size[1] / 2
+            dx = device.location[0] - center_x
+            dy = device.location[1] - center_y
+            # Perpendicular velocity for circular motion
+            device.velocity = (-dy * 0.01, dx * 0.01)
+        
+        # Update position using velocity
+        new_x = device.location[0] + device.velocity[0] * time_delta
+        new_y = device.location[1] + device.velocity[1] * time_delta
+        
+        # Boundary handling with bounce
+        if new_x < 0 or new_x > self.area_size[0]:
+            device.velocity = (-device.velocity[0], device.velocity[1])
+            new_x = max(0, min(self.area_size[0], new_x))
+        
+        if new_y < 0 or new_y > self.area_size[1]:
+            device.velocity = (device.velocity[0], -device.velocity[1])
+            new_y = max(0, min(self.area_size[1], new_y))
+        
+        device.location = (new_x, new_y)
+        device.trajectory_history.append(device.location)
+        
+        # Keep trajectory history limited
+        if len(device.trajectory_history) > 100:
+            device.trajectory_history.pop(0)
     
     def _check_handoff(self, device: Device6G):
         """Check if device needs handoff to different base station"""
@@ -242,6 +337,89 @@ class Network6GSimulator:
         
         return status
     
+    def simulate_base_station_mobility(self, time_delta: float = None):
+        """Simulate mobile/aerial base station movement"""
+        if time_delta is None:
+            time_delta = self.time_step
+        
+        for bs in self.base_stations:
+            if not bs.is_mobile:
+                continue
+            
+            # Move towards next patrol waypoint
+            if bs.patrol_waypoints:
+                target = bs.patrol_waypoints[0]
+                dx = target[0] - bs.location[0]
+                dy = target[1] - bs.location[1]
+                distance = np.sqrt(dx**2 + dy**2)
+                
+                if distance < 50:  # Reached waypoint
+                    bs.patrol_waypoints.append(bs.patrol_waypoints.pop(0))  # Cycle waypoints
+                    self._log_event(f"{bs.bs_id} reached waypoint, moving to next")
+                else:
+                    # Move towards waypoint
+                    direction = (dx / distance, dy / distance)
+                    bs.velocity = (direction[0] * bs.max_speed, direction[1] * bs.max_speed)
+                    
+                    new_x = bs.location[0] + bs.velocity[0] * time_delta
+                    new_y = bs.location[1] + bs.velocity[1] * time_delta
+                    bs.location = (new_x, new_y)
+                    bs.trajectory_history.append(bs.location)
+                    
+                    # Keep trajectory history limited
+                    if len(bs.trajectory_history) > 50:
+                        bs.trajectory_history.pop(0)
+                    
+                    # Trigger handoffs for all connected devices
+                    for device in list(bs.connected_devices.values()):
+                        self._check_handoff(device)
+    
+    def step_simulation(self, time_delta: float = None):
+        """Advance simulation by one time step"""
+        if time_delta is None:
+            time_delta = self.time_step
+        
+        if not self.mobility_enabled:
+            return
+        
+        # Move devices
+        self.simulate_mobility(time_delta=time_delta)
+        
+        # Move mobile base stations
+        self.simulate_base_station_mobility(time_delta)
+        
+        # Update simulation time
+        self.simulation_time += time_delta
+        
+        # Log status periodically
+        if int(self.simulation_time) % 10 == 0:  # Every 10 seconds
+            status = self.get_network_status()
+            self._log_event(f"Network status at t={self.simulation_time:.1f}s: "
+                          f"{status['active_devices']} active, {status['blocked_devices']} blocked")
+    
+    def get_mobility_statistics(self) -> Dict:
+        """Get statistics about device and BS mobility"""
+        device_speeds = []
+        bs_speeds = []
+        
+        for device in self.devices.values():
+            speed = np.sqrt(device.velocity[0]**2 + device.velocity[1]**2)
+            device_speeds.append(speed)
+        
+        for bs in self.base_stations:
+            if bs.is_mobile:
+                speed = np.sqrt(bs.velocity[0]**2 + bs.velocity[1]**2)
+                bs_speeds.append(speed)
+        
+        return {
+            "simulation_time": self.simulation_time,
+            "avg_device_speed": np.mean(device_speeds) if device_speeds else 0,
+            "max_device_speed": np.max(device_speeds) if device_speeds else 0,
+            "avg_bs_speed": np.mean(bs_speeds) if bs_speeds else 0,
+            "total_devices": len(self.devices),
+            "mobile_base_stations": len([bs for bs in self.base_stations if bs.is_mobile])
+        }
+    
     def _log_event(self, message: str):
         """Log network events"""
         log_entry = {
@@ -267,6 +445,20 @@ class FederatedLearning6G:
             location = (random.uniform(0, self.network.area_size[0]), 
                        random.uniform(0, self.network.area_size[1]))
             
+            # Assign movement pattern based on device type
+            if i < num_devices * 0.2:  # 20% static (IoT sensors)
+                movement_pattern = MovementPattern.STATIC
+                max_speed = 0.0
+            elif i < num_devices * 0.5:  # 30% pedestrian (random walk)
+                movement_pattern = MovementPattern.RANDOM_WALK
+                max_speed = 1.5  # ~5 km/h walking speed
+            elif i < num_devices * 0.8:  # 30% vehicles (directional)
+                movement_pattern = MovementPattern.DIRECTIONAL
+                max_speed = 15.0  # ~50 km/h vehicle speed
+            else:  # 20% circular pattern
+                movement_pattern = MovementPattern.CIRCULAR
+                max_speed = 8.0
+            
             device = Device6G(
                 device_id=str(i),
                 slice_type=slice_type,
@@ -274,7 +466,9 @@ class FederatedLearning6G:
                 signal_strength=0.8,
                 battery_level=random.uniform(0.3, 1.0),
                 compute_capacity=random.uniform(1e9, 1e12),  # FLOPS
-                bandwidth_mbps=100.0
+                bandwidth_mbps=100.0,
+                movement_pattern=movement_pattern,
+                max_speed=max_speed
             )
             
             # Add to network
@@ -290,10 +484,9 @@ class FederatedLearning6G:
         # Update trust scores and apply policies
         self.network.update_trust_scores(trust_weights)
         
-        # Simulate device mobility during training
-        for device_id in list(self.network.devices.keys()):
-            if random.random() < 0.3:  # 30% chance of movement
-                self.network.simulate_mobility(device_id)
+        # Simulate network mobility during training (simulate ~5 seconds of movement)
+        for _ in range(5):
+            self.network.step_simulation()
         
         # Check which devices can participate based on 6G constraints
         participating_devices = self._select_participating_devices()
@@ -301,7 +494,12 @@ class FederatedLearning6G:
         # Simulate training time with 6G latency
         training_time = self._simulate_training_latency(participating_devices)
         
+        # Get mobility statistics
+        mobility_stats = self.network.get_mobility_statistics()
+        
         print(f"[6G-FL] Round {round_num} completed in {training_time:.2f}s with {len(participating_devices)} devices")
+        print(f"[6G-FL] Mobility: avg_speed={mobility_stats['avg_device_speed']:.2f} m/s, "
+              f"mobile_BS={mobility_stats['mobile_base_stations']}")
         
         return participating_devices
     

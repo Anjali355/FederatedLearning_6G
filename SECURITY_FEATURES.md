@@ -222,6 +222,49 @@ python interactive_dashboard.py fullstack_artifacts 8052
 
 Open browser: `http://localhost:8050` (or respective port)
 
+### 6G Network Topology Visualization
+
+```bash
+# Generate network mobility visualization
+python3 visualize_network.py
+```
+
+**Output Files** (saved in `artifacts_flower/`):
+- `network_snapshot.png` - Network topology with:
+  - Device positions and movement trajectories
+  - Base station coverage areas (fixed and mobile)
+  - Device status colors (active/suspicious/blocked)
+  - Velocity arrows showing movement direction
+  - Network statistics panel
+  
+- `handoff_analysis.png` - Handoff statistics:
+  - Bar chart of handoffs per device
+  - Device status distribution pie chart
+
+**View Results:**
+```bash
+# Open visualizations (macOS)
+open artifacts_flower/network_snapshot.png
+open artifacts_flower/handoff_analysis.png
+
+# Or navigate to folder
+cd artifacts_flower
+```
+
+### Interactive Mobility Demo
+
+```bash
+# Run mobility simulation demo (no matplotlib required)
+python3 demo_mobility.py
+```
+
+Shows real-time console output of:
+- Device and base station initialization
+- Movement patterns (static, random walk, directional, circular)
+- Handoff events between base stations
+- Trust score updates and security policy enforcement
+- Mobility statistics (speeds, distances traveled)
+
 ---
 
 ## Architecture

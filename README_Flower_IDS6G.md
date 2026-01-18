@@ -12,14 +12,23 @@ This project implements a secure federated learning system integrated with a 6G 
 
 ### 6G Network Integration
 - Network slice management (eMBB, URLLC, mMTC)  
-- Base station simulation  
-- Device mobility tracking  
+- Base station simulation (fixed and mobile/aerial)
+- **Realistic device mobility simulation** with multiple movement patterns:
+  - Static devices (IoT sensors)
+  - Random walk (pedestrians)
+  - Directional movement (vehicles)
+  - Circular patterns
+- **Dynamic handoff management** between base stations
+- **Mobile base station** support with patrol routes
+- Real-time network topology visualization
+- Movement trajectory tracking
 
 ### Security Features
 - Trust score evaluation  
 - Client blocking mechanism  
 - Anomaly detection  
-- Network performance monitoring  
+- Network performance monitoring
+- Dynamic security policies based on device status  
 
 ## Setup
 
@@ -66,9 +75,63 @@ Command Line Arguments
 
 --outdir: Output directory
 
+## Network Mobility Simulation
+
+### Running Network Visualization
+Visualize the 6G network with moving devices and base stations:
+
+```bash
+python visualize_network.py
+```
+
+This will:
+- Create a snapshot of the network topology
+- Show device movements and trajectories
+- Display base station coverage areas
+- Visualize handoffs between base stations
+- Generate statistics on mobility patterns
+
+### Movement Patterns
+
+Devices in the network follow different mobility models:
+
+1. **Static** (20% of devices) - IoT sensors, fixed infrastructure
+   - Speed: 0 m/s
+   - Examples: Smart sensors, traffic cameras
+
+2. **Random Walk** (30% of devices) - Pedestrians, mobile workers
+   - Speed: ~1.5 m/s (5 km/h)
+   - Random direction changes
+
+3. **Directional** (30% of devices) - Vehicles, drones
+   - Speed: ~15 m/s (50 km/h)
+   - Maintains direction with occasional turns
+
+4. **Circular** (20% of devices) - Patrol routes, coverage areas
+   - Speed: ~8 m/s
+   - Circular movement patterns
+
+### Mobile Base Stations
+
+The system supports mobile/aerial base stations that:
+- Patrol predefined waypoints
+- Provide extended coverage
+- Trigger automatic handoffs for connected devices
+- Move at speeds up to 50 m/s
+
+### Key Mobility Features
+
+- **Automatic Handoffs**: Devices automatically switch to better base stations
+- **Trajectory Tracking**: Full history of device and BS movements
+- **Battery Drain**: Movement affects device battery levels
+- **Boundary Handling**: Devices bounce at simulation area edges
+- **Real-time Updates**: Network topology updates every simulation step
+
 Project Structure
 
 flower_federated_ids_6g.py — main script for federated learning
+network_6g.py — 6G network simulation with mobility
+visualize_network.py — network visualization tools
 
 artifacts_flower/ — stores logs, models, and simulation results
 
